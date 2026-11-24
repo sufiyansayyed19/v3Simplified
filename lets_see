@@ -1,0 +1,2 @@
+1. is_active: In vehicle table true only when vehicle is activated by admin.
+2.In bookings table if status is confirmed then it means vehicle is parked and if status is payment_pending then it means vehicle is not parked.  
