@@ -71,3 +71,19 @@ Two intervals overlap when:
   - `PAYMENT_PENDING` → `CONFIRMED` (when payment callback reports `SUCCESS` before `hold_expires_at`).
   - `PAYMENT_PENDING` → `EXPIRED` (when payment fails or `hold_expires_at <= now`).
   - `CONFIRMED` → `CANCELLED` (when user cancels before `start_time`).
+
+---
+
+## 6. Availability and Slot Allocation Rules
+
+- **Informational Availability:** `GET /api/v1/parking/availability` returns a real-time count of compatible free slots (`CONFIRMED` and unexpired `PAYMENT_PENDING` bookings are treated as occupied), but it does **not** reserve a slot.
+- **Authoritative Allocation:** `POST /api/v1/parking/bookings` locks compatible `ParkingSlot` rows (`SELECT ... FOR UPDATE`), picks the first unoccupied slot in ascending `slot_number` order (`C01..C60`, `B01..B40`), and rejects with `409 NO_PARKING_CAPACITY` if none remain.
+- **No User-Selected Slots & No Waitlist:** Users select a vehicle and time interval; the system auto-assigns the slot. Booking modification/extension is not supported—users cancel and create a new booking.
+
+---
+
+## 7. Authentication and Payment Rules
+
+- **Corporate-Email OTP Only:** Only email addresses matching `COMPANY_EMAIL_DOMAIN` (default `company.com`) are permitted (`403 CORPORATE_EMAIL_REQUIRED`). OTPs are 6 digits, expire in `OTP_EXPIRE_MINUTES` (5 minutes), and are single-use (`consumed_at` is set on verification and prior unused codes are invalidated when a new code is requested).
+- **Simulated Payments:** Allowed methods are `UPI`, `CARD`, and `WALLET`. Parking Service calculates `amount` (`₹10/hr` or `₹20/hr`); the client cannot supply an amount or payment status.
+- **One Payment Per Booking & No Resurrection:** `payments.booking_id` is unique. Failed or expired payments transition the booking to `EXPIRED` (no retry on the same booking; user creates a new booking). A late `SUCCESS` callback after `hold_expires_at <= now` never resurrects an `EXPIRED` booking.
