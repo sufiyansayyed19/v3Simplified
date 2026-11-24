@@ -19,6 +19,7 @@ from app.schemas.auth import (
     AuthTokenResponse,
     MessageResponse,
     SendCodeRequest,
+    UpdateProfileRequest,
     UserProfile,
     VerifyCodeRequest,
 )
@@ -115,4 +116,16 @@ def verify_company_code(
 
 @router.get("/users/me", response_model=UserProfile)
 def get_me(current_user: User = Depends(get_current_user)):
+    return UserProfile.model_validate(current_user)
+
+
+@router.patch("/users/me", response_model=UserProfile)
+def update_me(
+    payload: UpdateProfileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    current_user.name = payload.name.strip()
+    db.commit()
+    db.refresh(current_user)
     return UserProfile.model_validate(current_user)

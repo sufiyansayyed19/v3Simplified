@@ -100,3 +100,13 @@ def test_company_otp_login_and_me_flow(ctx):
     r_me = client.get("/api/v1/users/me", headers={"Authorization": f"Bearer {access_token}"})
     assert r_me.status_code == 200
     assert r_me.json()["email"] == "alice@company.com"
+    assert r_me.json()["name"] is None
+
+    # 6. PATCH /users/me updates user's name
+    r_patch = client.patch(
+        "/api/v1/users/me",
+        json={"name": "Alice Smith"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert r_patch.status_code == 200
+    assert r_patch.json()["name"] == "Alice Smith"
