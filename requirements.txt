@@ -1,5 +1,4 @@
 # Unified local development dependencies for the monorepo
-# (Each service also maintains its own requirements.txt for isolated deployment)
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 sqlalchemy>=2.0.30
@@ -9,6 +8,5 @@ pydantic>=2.7.0
 pydantic-settings>=2.2.0
 email-validator>=2.1.0
 httpx>=0.27.0
-PyJWT[crypto]>=2.8.0
-cryptography>=42.0.0
+PyJWT>=2.8.0
 pytest>=8.0.0

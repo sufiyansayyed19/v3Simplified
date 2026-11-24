@@ -1,17 +1,15 @@
-from datetime import date, datetime, time, timedelta, timezone
-import hashlib
-import json
+from datetime import date, datetime, time, timedelta
 import uuid
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
-from sqlalchemy import and_, desc, func, or_, select, text
+from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.clock import as_utc, get_now
 from app.core.database import get_db
 from app.core.errors import AppError
 from app.core.security import AuthContext, get_auth_context
-from app.models.parking import Booking, BookingIdempotencyKey, ParkingSlot
+from app.models.parking import Booking, ParkingSlot
 from app.schemas.parking import (
     AvailabilityResponse,
     BookingCancelResponse,
@@ -69,26 +67,6 @@ def _to_booking_response(booking: Booking, slot_number: str) -> BookingResponse:
     )
 
 
-def _request_payload_hash(payload: BookingCreateRequest) -> str:
-    canonical = json.dumps(
-        {
-            "vehicle_id": str(payload.vehicle_id),
-            "date": payload.date.isoformat(),
-            "start_time": _format_time(payload.start_time),
-            "end_time": _format_time(payload.end_time),
-            "requires_charging": payload.requires_charging,
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _acquire_user_advisory_lock(db: Session, user_id: uuid.UUID) -> None:
-    if db.bind is not None and db.bind.dialect.name == "postgresql":
-        lock_key = int.from_bytes(hashlib.sha256(user_id.bytes).digest()[:8], "big", signed=True)
-        db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
-
-
 def _expire_stale_holds(db: Session, bookings: list[Booking], now_utc: datetime) -> None:
     changed = False
     for b in bookings:
@@ -101,7 +79,6 @@ def _expire_stale_holds(db: Session, bookings: list[Booking], now_utc: datetime)
 
 @router.get("/availability", response_model=AvailabilityResponse)
 def check_availability(
-    request: Request,
     booking_date: date = Query(alias="date"),
     start_time: time = Query(...),
     end_time: time = Query(...),
@@ -114,21 +91,21 @@ def check_availability(
 ):
     validate_booking_interval(booking_date, start_time, end_time, now)
 
-    request_id = getattr(request.state, "request_id", None)
     vehicle = vehicle_client.get_owned_vehicle(
         vehicle_id=vehicle_id,
         bearer_token=auth.raw_token,
-        request_id=request_id,
     )
     validate_charging_compatibility(vehicle.is_ev, requires_charging)
 
     now_utc = as_utc(now)
-    slot_query = select(ParkingSlot.id).where(ParkingSlot.vehicle_type == vehicle.vehicle_type)
-    if requires_charging:
-        slot_query = slot_query.where(ParkingSlot.is_charging_enabled.is_(True))
-    else:
-        slot_query = slot_query.where(ParkingSlot.is_charging_enabled.is_(False))
-    compatible_slot_ids = list(db.execute(slot_query).scalars().all())
+    compatible_slot_ids = list(
+        db.execute(
+            select(ParkingSlot.id).where(
+                ParkingSlot.vehicle_type == vehicle.vehicle_type,
+                ParkingSlot.is_charging_enabled.is_(requires_charging),
+            )
+        ).scalars().all()
+    )
 
     if not compatible_slot_ids:
         available_count = 0
@@ -161,74 +138,41 @@ def check_availability(
 @router.post("/bookings", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
 def create_booking(
     payload: BookingCreateRequest,
-    request: Request,
-    response: Response,
-    idempotency_key: uuid.UUID = Header(..., alias="Idempotency-Key"),
     auth: AuthContext = Depends(get_auth_context),
     now: datetime = Depends(get_now),
     db: Session = Depends(get_db),
     vehicle_client: VehicleServiceClient = Depends(get_vehicle_client),
     payment_client: PaymentServiceClient = Depends(get_payment_client),
 ):
-    req_hash = _request_payload_hash(payload)
-    request_id = getattr(request.state, "request_id", None)
     now_utc = as_utc(now)
 
-    # 1. Check existing idempotency record for (user_id, idempotency_key)
-    existing_idem = db.execute(
-        select(BookingIdempotencyKey).where(
-            BookingIdempotencyKey.user_id == auth.user_id,
-            BookingIdempotencyKey.idempotency_key == idempotency_key,
-        )
-    ).scalar_one_or_none()
-
-    if existing_idem is not None:
-        if existing_idem.request_hash != req_hash:
-            raise AppError(
-                409,
-                "IDEMPOTENCY_CONFLICT",
-                "Idempotency-Key was already used with a different booking payload.",
-            )
-        existing_booking = db.execute(
-            select(Booking).options(joinedload(Booking.slot)).where(Booking.id == existing_idem.booking_id)
-        ).scalar_one()
-        _expire_stale_holds(db, [existing_booking], now_utc)
-        # Recover payment creation if the previous attempt timed out before saving payment_id
-        if (
-            existing_booking.payment_id is None
-            and existing_booking.status == "PAYMENT_PENDING"
-            and existing_booking.hold_expires_at is not None
-            and as_utc(existing_booking.hold_expires_at) > now_utc
-        ):
-            payment_id = payment_client.create_payment(
-                booking_id=existing_booking.id,
-                user_id=auth.user_id,
-                amount=existing_booking.amount,
-                expires_at=as_utc(existing_booking.hold_expires_at),
-                request_id=request_id,
-            )
-            existing_booking.payment_id = payment_id
-            db.commit()
-            db.refresh(existing_booking)
-
-        response.status_code = status.HTTP_200_OK
-        return _to_booking_response(existing_booking, existing_booking.slot.slot_number)
-
-    # 2. Validate time rules and vehicle attributes
+    # 1. Validate booking rules and vehicle ownership via Vehicle Service
     validate_booking_interval(payload.date, payload.start_time, payload.end_time, now)
     vehicle = vehicle_client.get_owned_vehicle(
         vehicle_id=payload.vehicle_id,
         bearer_token=auth.raw_token,
-        request_id=request_id,
     )
     validate_charging_compatibility(vehicle.is_ev, payload.requires_charging)
 
     amount = calculate_booking_amount(payload.start_time, payload.end_time, payload.requires_charging)
     hold_expires_at = now_utc + timedelta(minutes=HOLD_DURATION_MINUTES)
 
-    # 3. Transaction: per-user advisory lock + slot row locking + overlap recheck (Q-06, Q-17)
-    _acquire_user_advisory_lock(db, auth.user_id)
+    # 2. Lock compatible slots in PostgreSQL with FOR UPDATE to prevent double-booking
+    slot_stmt = (
+        select(ParkingSlot)
+        .where(
+            ParkingSlot.vehicle_type == vehicle.vehicle_type,
+            ParkingSlot.is_charging_enabled.is_(payload.requires_charging),
+        )
+        .order_by(ParkingSlot.slot_number.asc())
+    )
+    if db.bind is not None and db.bind.dialect.name == "postgresql":
+        slot_stmt = slot_stmt.with_for_update()
 
+    compatible_slots = list(db.execute(slot_stmt).scalars().all())
+    compatible_slot_ids = [s.id for s in compatible_slots]
+
+    # 3. Check if this user already has an overlapping active booking
     user_overlap = db.execute(
         select(Booking.id)
         .where(
@@ -247,20 +191,7 @@ def create_booking(
             "You already have an overlapping active booking for this time interval.",
         )
 
-    slot_stmt = (
-        select(ParkingSlot)
-        .where(
-            ParkingSlot.vehicle_type == vehicle.vehicle_type,
-            ParkingSlot.is_charging_enabled.is_(payload.requires_charging),
-        )
-        .order_by(ParkingSlot.slot_number.asc())
-    )
-    if db.bind is not None and db.bind.dialect.name == "postgresql":
-        slot_stmt = slot_stmt.with_for_update()
-
-    compatible_slots = list(db.execute(slot_stmt).scalars().all())
-    compatible_slot_ids = [s.id for s in compatible_slots]
-
+    # 4. Find the first compatible slot that is not occupied
     occupied_slot_ids = set()
     if compatible_slot_ids:
         occupied_slot_ids = set(
@@ -301,27 +232,15 @@ def create_booking(
         hold_expires_at=hold_expires_at,
     )
     db.add(booking)
-    db.flush()
-
-    db.add(
-        BookingIdempotencyKey(
-            user_id=auth.user_id,
-            idempotency_key=idempotency_key,
-            request_hash=req_hash,
-            booking_id=booking.id,
-        )
-    )
-    # Commit booking hold BEFORE calling Payment Service (never hold a DB transaction across HTTP)
     db.commit()
     db.refresh(booking)
 
-    # 4. Create payment attempt in Payment Service and persist payment_id
+    # 5. Create pending payment in Payment Service
     payment_id = payment_client.create_payment(
         booking_id=booking.id,
         user_id=auth.user_id,
         amount=booking.amount,
         expires_at=hold_expires_at,
-        request_id=request_id,
     )
     booking.payment_id = payment_id
     db.commit()
@@ -391,11 +310,9 @@ def cancel_booking(
     now: datetime = Depends(get_now),
     db: Session = Depends(get_db),
 ):
-    stmt = select(Booking).where(Booking.id == booking_id, Booking.user_id == auth.user_id)
-    if db.bind is not None and db.bind.dialect.name == "postgresql":
-        stmt = stmt.with_for_update()
-
-    booking = db.execute(stmt).scalar_one_or_none()
+    booking = db.execute(
+        select(Booking).where(Booking.id == booking_id, Booking.user_id == auth.user_id)
+    ).scalar_one_or_none()
     if booking is None:
         raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found.")
 
@@ -413,7 +330,7 @@ def cancel_booking(
         raise AppError(
             409,
             "BOOKING_NOT_CANCELLABLE",
-            "Confirmed bookings can only be cancelled strictly more than 5 minutes before the start time.",
+            "Confirmed bookings can only be cancelled before the booking start time.",
         )
 
     booking.status = "CANCELLED"

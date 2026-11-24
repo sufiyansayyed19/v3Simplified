@@ -1,8 +1,8 @@
-# Run all service, gateway, PostgreSQL concurrency, and E2E tests in isolated processes
+# Run all service, PostgreSQL concurrency, and E2E tests in isolated processes
 # Run from project root: .\scripts\run_all_tests.ps1
 
 $Root = (Resolve-Path "$PSScriptRoot\..").Path
-$Pytest = Join-Path $Root ".venv\Scripts\pytest.exe"
+$Python = Join-Path $Root ".venv\Scripts\python.exe"
 
 $Suites = @(
     "services/user-auth-service/tests/test_auth.py",
@@ -10,7 +10,6 @@ $Suites = @(
     "services/parking-service/tests/test_parking.py",
     "services/parking-service/tests/test_internal.py",
     "services/payment-service/tests/test_payments.py",
-    "gateway/tests/test_gateway.py",
     "tests/test_pg_concurrency.py",
     "tests/test_e2e_journey.py"
 )
@@ -18,7 +17,7 @@ $Suites = @(
 $Failed = @()
 foreach ($Suite in $Suites) {
     Write-Host "`n=== Running $Suite ===" -ForegroundColor Cyan
-    & $Pytest $Suite -v
+    & $Python -m pytest $Suite -v
     if ($LASTEXITCODE -ne 0) {
         $Failed += $Suite
     }

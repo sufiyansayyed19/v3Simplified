@@ -1,3 +1,3 @@
-from app.models.auth import AuthIdentity, RefreshSession, User, VerificationCode
+from app.models.auth import User, VerificationCode
 
-__all__ = ["User", "AuthIdentity", "VerificationCode", "RefreshSession"]
+__all__ = ["User", "VerificationCode"]

@@ -1,8 +1,7 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -16,7 +15,6 @@ from app.schemas.vehicle import (
     VehicleResponse,
     VehicleUpdate,
 )
-from app.services.parking_client import ParkingDependencyClient, get_parking_client
 
 router = APIRouter(prefix="/api/v1/vehicles", tags=["vehicles"])
 
@@ -58,12 +56,7 @@ def create_vehicle(
         is_active=True,
     )
     db.add(vehicle)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise AppError(409, "VEHICLE_ALREADY_REGISTERED", "An active vehicle with this number is already registered.")
-
+    db.commit()
     db.refresh(vehicle)
     return VehicleResponse.model_validate(vehicle)
 
@@ -95,20 +88,10 @@ def get_vehicle(
 def update_vehicle(
     vehicle_id: uuid.UUID,
     payload: VehicleUpdate,
-    request: Request,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: Session = Depends(get_db),
-    parking_client: ParkingDependencyClient = Depends(get_parking_client),
 ):
     vehicle = _get_owned_active_vehicle(db, vehicle_id, user_id)
-
-    request_id = getattr(request.state, "request_id", None)
-    if parking_client.has_blocking_booking(vehicle_id=vehicle.id, request_id=request_id):
-        raise AppError(
-            409,
-            "VEHICLE_HAS_BLOCKING_BOOKING",
-            "Vehicle cannot be updated while an active or future booking depends on it.",
-        )
 
     duplicate = db.execute(
         select(Vehicle).where(
@@ -125,12 +108,7 @@ def update_vehicle(
     vehicle.vehicle_type = payload.vehicle_type
     vehicle.is_ev = payload.is_ev
 
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise AppError(409, "VEHICLE_ALREADY_REGISTERED", "An active vehicle with this number is already registered.")
-
+    db.commit()
     db.refresh(vehicle)
     return VehicleResponse.model_validate(vehicle)
 
@@ -138,21 +116,10 @@ def update_vehicle(
 @router.delete("/{vehicle_id}", response_model=VehicleDeactivateResponse)
 def deactivate_vehicle(
     vehicle_id: uuid.UUID,
-    request: Request,
     user_id: uuid.UUID = Depends(get_current_user_id),
     db: Session = Depends(get_db),
-    parking_client: ParkingDependencyClient = Depends(get_parking_client),
 ):
     vehicle = _get_owned_active_vehicle(db, vehicle_id, user_id)
-
-    request_id = getattr(request.state, "request_id", None)
-    if parking_client.has_blocking_booking(vehicle_id=vehicle.id, request_id=request_id):
-        raise AppError(
-            409,
-            "VEHICLE_HAS_BLOCKING_BOOKING",
-            "Vehicle cannot be removed while an active or future booking depends on it.",
-        )
-
     vehicle.is_active = False
     db.commit()
 

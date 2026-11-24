@@ -12,7 +12,6 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
-REPO_ROOT = SERVICE_DIR.parents[1]
 if str(SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(SERVICE_DIR))
 
@@ -31,16 +30,13 @@ from app.services.clients import (  # noqa: E402
 
 
 def _make_jwt(user_id: uuid.UUID) -> str:
-    private_key = (REPO_ROOT / "keys" / "jwt_private.pem").read_text(encoding="utf-8")
     now = datetime.now(timezone.utc)
     payload = {
-        "iss": settings.JWT_ISSUER,
-        "aud": settings.JWT_AUDIENCE,
         "sub": str(user_id),
         "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=15)).timestamp()),
+        "exp": int((now + timedelta(minutes=60)).timestamp()),
     }
-    return jwt.encode(payload, private_key, algorithm="RS256")
+    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
 class FakeVehicleClient(VehicleServiceClient):
@@ -77,7 +73,6 @@ def ctx():
     Base.metadata.create_all(bind=engine)
     TestingSessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, expire_on_commit=False)
 
-    # Seed a small deterministic pool: 2 normal cars, 1 charging car, 1 normal bike
     with TestingSessionLocal() as db:
         db.add_all(
             [
@@ -98,7 +93,6 @@ def ctx():
         ),
     }
 
-    # Default clock: Monday 2026-11-23 08:30 IST
     clock = {"now": datetime(2026, 11, 23, 8, 30, 0, tzinfo=IST_FALLBACK)}
     vehicle_client = FakeVehicleClient(vehicles)
     payment_client = FakePaymentClient()
@@ -131,7 +125,7 @@ def ctx():
     Base.metadata.drop_all(bind=engine)
 
 
-def test_availability_booking_snapshots_idempotency_and_overlap(ctx):
+def test_availability_booking_snapshots_and_overlap(ctx):
     client = ctx["client"]
     h_a = ctx["headers_a"]
     h_b = ctx["headers_b"]
@@ -152,8 +146,7 @@ def test_availability_booking_snapshots_idempotency_and_overlap(ctx):
     assert r_avail.json()["available_slots"] == 1
     assert Decimal(str(r_avail.json()["rate_per_hour"])) == Decimal("20.00")
 
-    # 2. Create booking with Idempotency-Key -> 201, ₹60, snapshots stored, slot C51 allocated
-    idem_key = str(uuid.uuid4())
+    # 2. Create booking -> 201, ₹60, snapshots stored, slot C51 allocated
     payload = {
         "vehicle_id": str(ctx["ev_car_id"]),
         "date": "2026-11-23",
@@ -161,33 +154,16 @@ def test_availability_booking_snapshots_idempotency_and_overlap(ctx):
         "end_time": "13:00",
         "requires_charging": True,
     }
-    r_book = client.post("/api/v1/parking/bookings", json=payload, headers={**h_a, "Idempotency-Key": idem_key})
+    r_book = client.post("/api/v1/parking/bookings", json=payload, headers=h_a)
     assert r_book.status_code == 201
     b = r_book.json()
     assert b["slot_number"] == "C51"
     assert b["vehicle_number_snapshot"] == "MH12EV0001"
-    assert b["vehicle_type_snapshot"] == "CAR"
-    assert b["is_ev_snapshot"] is True
     assert Decimal(str(b["amount"])) == Decimal("60.00")
     assert b["status"] == "PAYMENT_PENDING"
     assert b["payment_id"] is not None
 
-    # 3. Replay with same Idempotency-Key + same payload -> 200, same booking, no 2nd payment
-    r_replay = client.post("/api/v1/parking/bookings", json=payload, headers={**h_a, "Idempotency-Key": idem_key})
-    assert r_replay.status_code == 200
-    assert r_replay.json()["booking_id"] == b["booking_id"]
-    assert len(ctx["payment_client"].calls) == 1
-
-    # 4. Same Idempotency-Key + different payload -> 409 IDEMPOTENCY_CONFLICT
-    r_conflict = client.post(
-        "/api/v1/parking/bookings",
-        json={**payload, "end_time": "12:00"},
-        headers={**h_a, "Idempotency-Key": idem_key},
-    )
-    assert r_conflict.status_code == 409
-    assert r_conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
-
-    # 5. User A tries overlapping booking with a different vehicle -> 409 USER_BOOKING_OVERLAP
+    # 3. User A tries overlapping booking -> 409 USER_BOOKING_OVERLAP
     r_user_ov = client.post(
         "/api/v1/parking/bookings",
         json={
@@ -197,12 +173,12 @@ def test_availability_booking_snapshots_idempotency_and_overlap(ctx):
             "end_time": "14:00",
             "requires_charging": False,
         },
-        headers={**h_a, "Idempotency-Key": str(uuid.uuid4())},
+        headers=h_a,
     )
     assert r_user_ov.status_code == 409
     assert r_user_ov.json()["error"]["code"] == "USER_BOOKING_OVERLAP"
 
-    # 6. Adjacent interval (13:00-15:00) for User A is ALLOWED
+    # 4. Adjacent interval (13:00-15:00) for User A is ALLOWED
     r_adj = client.post(
         "/api/v1/parking/bookings",
         json={
@@ -212,22 +188,18 @@ def test_availability_booking_snapshots_idempotency_and_overlap(ctx):
             "end_time": "15:00",
             "requires_charging": False,
         },
-        headers={**h_a, "Idempotency-Key": str(uuid.uuid4())},
+        headers=h_a,
     )
     assert r_adj.status_code == 201
     assert Decimal(str(r_adj.json()["amount"])) == Decimal("20.00")
 
-    # 7. User B tries charging car for 10:00-13:00 -> 409 NO_PARKING_CAPACITY (C51 is held)
-    r_full = client.post(
-        "/api/v1/parking/bookings",
-        json=payload,
-        headers={**h_b, "Idempotency-Key": str(uuid.uuid4())},
-    )
+    # 5. User B tries charging car for 10:00-13:00 -> 409 NO_PARKING_CAPACITY (C51 is held)
+    r_full = client.post("/api/v1/parking/bookings", json=payload, headers=h_b)
     assert r_full.status_code == 409
     assert r_full.json()["error"]["code"] == "NO_PARKING_CAPACITY"
 
 
-def test_time_boundaries_same_hour_and_sunday_rules(ctx):
+def test_time_rules_and_sunday_closure(ctx):
     client = ctx["client"]
     h_a = ctx["headers_a"]
 
@@ -241,59 +213,26 @@ def test_time_boundaries_same_hour_and_sunday_rules(ctx):
             "end_time": "11:00",
             "requires_charging": True,
         },
-        headers={**h_a, "Idempotency-Key": str(uuid.uuid4())},
+        headers=h_a,
     )
     assert r_non_ev.status_code == 422
     assert r_non_ev.json()["error"]["code"] == "CHARGING_NOT_SUPPORTED"
 
-    # Exactly 15 min before 09:00 (08:45) -> REJECTED
-    ctx["clock"]["now"] = datetime(2026, 11, 23, 8, 45, 0, tzinfo=IST_FALLBACK)
-    r_15 = client.post(
+    # Past time slot (08:00 when now is 08:30) -> 422 INVALID_BOOKING_TIME
+    r_past = client.post(
         "/api/v1/parking/bookings",
         json={
             "vehicle_id": str(ctx["non_ev_car_id"]),
             "date": "2026-11-23",
-            "start_time": "09:00",
-            "end_time": "10:00",
+            "start_time": "08:00",
+            "end_time": "09:00",
             "requires_charging": False,
         },
-        headers={**h_a, "Idempotency-Key": str(uuid.uuid4())},
+        headers=h_a,
     )
-    assert r_15.status_code == 422
+    assert r_past.status_code == 422
 
-    # Same-hour exception at 09:20 for 09:00-10:00 -> ALLOWED, full ₹10 charged
-    ctx["clock"]["now"] = datetime(2026, 11, 23, 9, 20, 0, tzinfo=IST_FALLBACK)
-    r_same = client.post(
-        "/api/v1/parking/bookings",
-        json={
-            "vehicle_id": str(ctx["non_ev_car_id"]),
-            "date": "2026-11-23",
-            "start_time": "09:00",
-            "end_time": "10:00",
-            "requires_charging": False,
-        },
-        headers={**h_a, "Idempotency-Key": str(uuid.uuid4())},
-    )
-    assert r_same.status_code == 201
-    assert r_same.json()["start_time"] == "09:00"
-    assert Decimal(str(r_same.json()["amount"])) == Decimal("10.00")
-
-    # At 09:35, 09:00-10:00 is REJECTED
-    ctx["clock"]["now"] = datetime(2026, 11, 23, 9, 35, 0, tzinfo=IST_FALLBACK)
-    r_late = client.post(
-        "/api/v1/parking/bookings",
-        json={
-            "vehicle_id": str(ctx["ev_car_id"]),
-            "date": "2026-11-23",
-            "start_time": "09:00",
-            "end_time": "10:00",
-            "requires_charging": False,
-        },
-        headers={**ctx["headers_b"], "Idempotency-Key": str(uuid.uuid4())},
-    )
-    assert r_late.status_code == 422
-
-    # Sunday (2026-11-22) is closed even when today is Saturday 2026-11-21
+    # Sunday (2026-11-22) is closed
     ctx["clock"]["now"] = datetime(2026, 11, 21, 10, 0, 0, tzinfo=IST_FALLBACK)
     r_sun = client.post(
         "/api/v1/parking/bookings",
@@ -304,17 +243,16 @@ def test_time_boundaries_same_hour_and_sunday_rules(ctx):
             "end_time": "11:00",
             "requires_charging": False,
         },
-        headers={**h_a, "Idempotency-Key": str(uuid.uuid4())},
+        headers=h_a,
     )
     assert r_sun.status_code == 422
     assert r_sun.json()["error"]["code"] == "BOOKING_WINDOW_VIOLATION"
 
 
-def test_cancellation_cutoff_and_lazy_hold_expiry(ctx):
+def test_cancellation_and_lazy_hold_expiry(ctx):
     client = ctx["client"]
     h_a = ctx["headers_a"]
 
-    # Create booking for 10:00-11:00 at 08:30
     r = client.post(
         "/api/v1/parking/bookings",
         json={
@@ -324,30 +262,26 @@ def test_cancellation_cutoff_and_lazy_hold_expiry(ctx):
             "end_time": "11:00",
             "requires_charging": False,
         },
-        headers={**h_a, "Idempotency-Key": str(uuid.uuid4())},
+        headers=h_a,
     )
     booking_id = r.json()["booking_id"]
 
     # Cannot cancel PAYMENT_PENDING booking
     assert client.post(f"/api/v1/parking/bookings/{booking_id}/cancel", headers=h_a).status_code == 409
 
-    # Mark booking CONFIRMED in DB (simulating payment callback)
+    # Mark booking CONFIRMED in DB
     with ctx["db_factory"]() as db:
         b = db.get(Booking, uuid.UUID(booking_id))
         b.status = "CONFIRMED"
         db.commit()
 
-    # Exactly 5 minutes before start (09:55) -> REJECTED
+    # Cancel before start_time -> ALLOWED
     ctx["clock"]["now"] = datetime(2026, 11, 23, 9, 55, 0, tzinfo=IST_FALLBACK)
-    assert client.post(f"/api/v1/parking/bookings/{booking_id}/cancel", headers=h_a).status_code == 409
-
-    # 6 minutes before start (09:54) -> ALLOWED
-    ctx["clock"]["now"] = datetime(2026, 11, 23, 9, 54, 0, tzinfo=IST_FALLBACK)
     r_cancel = client.post(f"/api/v1/parking/bookings/{booking_id}/cancel", headers=h_a)
     assert r_cancel.status_code == 200
     assert r_cancel.json()["status"] == "CANCELLED"
 
-    # Create another booking and advance clock past 5-min hold -> lazy expiry flips to EXPIRED on GET
+    # Unpaid hold expires after 5 minutes on GET
     ctx["clock"]["now"] = datetime(2026, 11, 23, 8, 30, 0, tzinfo=IST_FALLBACK)
     r2 = client.post(
         "/api/v1/parking/bookings",
@@ -358,7 +292,7 @@ def test_cancellation_cutoff_and_lazy_hold_expiry(ctx):
             "end_time": "15:00",
             "requires_charging": False,
         },
-        headers={**h_a, "Idempotency-Key": str(uuid.uuid4())},
+        headers=h_a,
     )
     b2_id = r2.json()["booking_id"]
 

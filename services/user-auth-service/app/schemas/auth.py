@@ -28,9 +28,3 @@ class AuthTokenResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
     user: UserProfile
-
-
-class RefreshTokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    expires_in: int

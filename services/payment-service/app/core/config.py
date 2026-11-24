@@ -7,13 +7,11 @@ class Settings(BaseSettings):
     PORT: int = 8004
     DATABASE_URL: str = "postgresql+psycopg://payment_user:payment_pass@localhost:5432/payment_db"
 
-    JWT_PUBLIC_KEY_PATH: str = "../../keys/jwt_public.pem"
-    JWT_ISSUER: str = "corporate-parking-auth"
-    JWT_AUDIENCE: str = "corporate-parking"
+    JWT_SECRET_KEY: str = "super-secret-jwt-key-for-corporate-parking"
+    JWT_ALGORITHM: str = "HS256"
 
     PARKING_SERVICE_URL: str = "http://127.0.0.1:8003"
-    PARKING_TO_PAYMENT_TOKEN: str = "dev-parking-to-payment-token"
-    PAYMENT_TO_PARKING_TOKEN: str = "dev-payment-to-parking-token"
+    INTERNAL_SERVICE_TOKEN: str = "dev-internal-service-token"
 
     PAYMENT_SIMULATION_DEFAULT_OUTCOME: str = "SUCCESS"
     ENABLE_TEST_PAYMENT_OVERRIDE: bool = True

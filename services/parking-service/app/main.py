@@ -1,21 +1,23 @@
-import uuid
-from fastapi import FastAPI, Request
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
 from app.api.internal import router as internal_router
 from app.api.v1.parking import router as parking_router
 from app.core.config import settings
+from app.core.database import Base, SessionLocal, engine, get_db
 from app.core.errors import register_exception_handlers
+from app.models.parking import seed_default_slots
 
-app = FastAPI(title="Corporate Parking — Parking Service")
+
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    if get_db not in app_instance.dependency_overrides:
+        Base.metadata.create_all(bind=engine)
+        with SessionLocal() as db:
+            seed_default_slots(db)
+    yield
 
 
-@app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    request.state.request_id = request_id
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
-    return response
-
+app = FastAPI(title="Corporate Parking — Parking Service", lifespan=lifespan)
 
 register_exception_handlers(app)
 app.include_router(parking_router)

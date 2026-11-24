@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import uuid
 
-from fastapi import APIRouter, Depends, Header, Request, Response, status
+from fastapi import APIRouter, Depends, Header, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -32,7 +32,6 @@ def _as_utc(dt: datetime) -> datetime:
 
 
 def _resolve_simulated_outcome(test_override: str | None) -> str:
-    # Deterministic, backend-controlled outcome (A-43)
     if (
         test_override is not None
         and settings.ENABLE_TEST_PAYMENT_OVERRIDE
@@ -65,15 +64,13 @@ def create_internal_payment(
     ).scalar_one_or_none()
 
     if existing is not None:
-        # Idempotent replay if immutable attributes match; 409 on conflict
         same_user = existing.user_id == payload.user_id
         same_amount = Decimal(existing.amount) == Decimal(payload.amount)
-        same_expiry = abs((_as_utc(existing.expires_at) - req_expires_utc).total_seconds()) < 1.0
-        if not (same_user and same_amount and same_expiry):
+        if not (same_user and same_amount):
             raise AppError(
                 409,
                 "PAYMENT_REQUEST_CONFLICT",
-                "A payment for this booking already exists with different immutable values.",
+                "A payment for this booking already exists with different values.",
             )
         response.status_code = status.HTTP_200_OK
         return InternalPaymentCreateResponse(
@@ -112,18 +109,15 @@ def create_internal_payment(
 def process_payment(
     payment_id: uuid.UUID,
     payload: PaymentProcessRequest,
-    request: Request,
     test_outcome_header: str | None = Header(default=None, alias="X-Test-Payment-Outcome"),
     user_id: uuid.UUID = Depends(get_current_user_id),
     now_utc: datetime = Depends(get_now_utc),
     db: Session = Depends(get_db),
     callback_client: ParkingCallbackClient = Depends(get_callback_client),
 ):
-    stmt = select(Payment).where(Payment.id == payment_id, Payment.user_id == user_id)
-    if db.bind is not None and db.bind.dialect.name == "postgresql":
-        stmt = stmt.with_for_update()
-
-    payment = db.execute(stmt).scalar_one_or_none()
+    payment = db.execute(
+        select(Payment).where(Payment.id == payment_id, Payment.user_id == user_id)
+    ).scalar_one_or_none()
     if payment is None:
         raise AppError(404, "PAYMENT_NOT_FOUND", "Payment not found.")
 
@@ -136,29 +130,19 @@ def process_payment(
     outcome = _resolve_simulated_outcome(test_outcome_header)
     txn_id = f"TXN{uuid.uuid4().hex[:10].upper()}" if outcome == "SUCCESS" else None
 
-    # Persist final simulated outcome BEFORE attempting callback to Parking
     payment.payment_method = payload.payment_method
     payment.status = outcome
     payment.transaction_id = txn_id
     db.commit()
     db.refresh(payment)
 
-    request_id = getattr(request.state, "request_id", None)
-    delivered, attempts, last_error = callback_client.deliver_payment_result(
+    callback_client.deliver_payment_result(
         booking_id=payment.booking_id,
         payment_id=payment.id,
         status=payment.status,
         transaction_id=payment.transaction_id,
         processed_at=_as_utc(now_utc),
-        request_id=request_id,
     )
-    payment.callback_attempts += attempts
-    if delivered:
-        payment.callback_delivered_at = _as_utc(now_utc)
-        payment.callback_last_error = None
-    else:
-        payment.callback_last_error = last_error
-    db.commit()
 
     return PaymentProcessResponse(
         payment_id=payment.id,

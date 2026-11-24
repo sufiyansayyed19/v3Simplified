@@ -1,7 +1,7 @@
-"""Real PostgreSQL concurrency & locking tests against parking_db (Q-06, Section 8)."""
+"""Real PostgreSQL concurrency & locking tests against parking_db."""
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import sys
@@ -9,9 +9,8 @@ import threading
 import uuid
 
 import jwt
-import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PARKING_DIR = REPO_ROOT / "services" / "parking-service"
@@ -20,9 +19,9 @@ if str(PARKING_DIR) not in sys.path:
 
 from app.core.clock import IST_FALLBACK, get_now  # noqa: E402
 from app.core.config import settings  # noqa: E402
-from app.core.database import SessionLocal  # noqa: E402
+from app.core.database import Base, SessionLocal, engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models.parking import Booking, BookingIdempotencyKey, ParkingSlot  # noqa: E402
+from app.models.parking import Booking, seed_default_slots  # noqa: E402
 from app.services.clients import (  # noqa: E402
     PaymentServiceClient,
     VehicleInfo,
@@ -33,16 +32,13 @@ from app.services.clients import (  # noqa: E402
 
 
 def _make_jwt(user_id: uuid.UUID) -> str:
-    private_key = (REPO_ROOT / "keys" / "jwt_private.pem").read_text(encoding="utf-8")
     now = datetime.now(timezone.utc)
     payload = {
-        "iss": settings.JWT_ISSUER,
-        "aud": settings.JWT_AUDIENCE,
         "sub": str(user_id),
         "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=15)).timestamp()),
+        "exp": int((now + timedelta(minutes=60)).timestamp()),
     }
-    return jwt.encode(payload, private_key, algorithm="RS256")
+    return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
 class _StubVehicleClient(VehicleServiceClient):
@@ -72,16 +68,21 @@ class _StubPaymentClient(PaymentServiceClient):
         return uuid.uuid4()
 
 
+def _ensure_parking_db_ready() -> None:
+    Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        seed_default_slots(db)
+
+
 def _cleanup_bookings(user_ids: list[uuid.UUID]) -> None:
     with SessionLocal() as db:
-        db.execute(delete(BookingIdempotencyKey).where(BookingIdempotencyKey.user_id.in_(user_ids)))
         db.execute(delete(Booking).where(Booking.user_id.in_(user_ids)))
         db.commit()
 
 
 def test_pg_ev_bike_slot_race_no_double_allocation():
     """10 different users simultaneously race for the 5 EV-charging bike slots (B36-B40)."""
-    # Monday 2026-11-23 08:30 IST
+    _ensure_parking_db_ready()
     fixed_now = datetime(2026, 11, 23, 8, 30, 0, tzinfo=IST_FALLBACK)
     target_date = "2026-11-23"
 
@@ -104,10 +105,7 @@ def test_pg_ev_bike_slot_race_no_double_allocation():
                 "end_time": "11:00",
                 "requires_charging": True,
             },
-            headers={
-                "Authorization": f"Bearer {_make_jwt(uid)}",
-                "Idempotency-Key": str(uuid.uuid4()),
-            },
+            headers={"Authorization": f"Bearer {_make_jwt(uid)}"},
         )
         return resp.status_code, resp.json()
 
@@ -118,7 +116,6 @@ def test_pg_ev_bike_slot_race_no_double_allocation():
         successes = [body for code, body in results if code == 201]
         conflicts = [body for code, body in results if code == 409]
 
-        # Exactly 5 EV-bike slots exist in parking_db (B36-B40)
         assert len(successes) == 5, f"Expected 5 successes, got {len(successes)}: {results}"
         assert len(conflicts) == 5
         allocated_slots = [b["slot_number"] for b in successes]
@@ -130,7 +127,8 @@ def test_pg_ev_bike_slot_race_no_double_allocation():
 
 
 def test_pg_same_user_simultaneous_overlap_serialized():
-    """1 user fires 4 simultaneous overlapping requests with different vehicles -> at most 1 succeeds."""
+    """1 user fires 4 simultaneous overlapping requests -> at most 1 succeeds."""
+    _ensure_parking_db_ready()
     fixed_now = datetime(2026, 11, 23, 8, 30, 0, tzinfo=IST_FALLBACK)
     user_id = uuid.uuid4()
 
@@ -153,10 +151,7 @@ def test_pg_same_user_simultaneous_overlap_serialized():
                 "end_time": "16:00",
                 "requires_charging": False,
             },
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Idempotency-Key": str(uuid.uuid4()),
-            },
+            headers={"Authorization": f"Bearer {token}"},
         )
         return resp.status_code, resp.json()
 

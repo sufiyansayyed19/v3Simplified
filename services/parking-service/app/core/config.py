@@ -9,16 +9,12 @@ class Settings(BaseSettings):
 
     BUSINESS_TIMEZONE: str = "Asia/Kolkata"
 
-    JWT_PUBLIC_KEY_PATH: str = "../../keys/jwt_public.pem"
-    JWT_ISSUER: str = "corporate-parking-auth"
-    JWT_AUDIENCE: str = "corporate-parking"
+    JWT_SECRET_KEY: str = "super-secret-jwt-key-for-corporate-parking"
+    JWT_ALGORITHM: str = "HS256"
 
     VEHICLE_SERVICE_URL: str = "http://127.0.0.1:8002"
     PAYMENT_SERVICE_URL: str = "http://127.0.0.1:8004"
-    PARKING_TO_VEHICLE_TOKEN: str = "dev-parking-to-vehicle-token"
-    PARKING_TO_PAYMENT_TOKEN: str = "dev-parking-to-payment-token"
-    PAYMENT_TO_PARKING_TOKEN: str = "dev-payment-to-parking-token"
-    VEHICLE_TO_PARKING_TOKEN: str = "dev-vehicle-to-parking-token"
+    INTERNAL_SERVICE_TOKEN: str = "dev-internal-service-token"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

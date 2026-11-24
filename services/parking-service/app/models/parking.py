@@ -2,20 +2,9 @@ import uuid
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 
-from sqlalchemy import (
-    Boolean,
-    CheckConstraint,
-    Date,
-    DateTime,
-    ForeignKey,
-    Index,
-    Numeric,
-    String,
-    Time,
-    UniqueConstraint,
-)
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, String, Time, func, select
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from app.core.database import Base
 
@@ -26,9 +15,6 @@ def utcnow() -> datetime:
 
 class ParkingSlot(Base):
     __tablename__ = "parking_slots"
-    __table_args__ = (
-        CheckConstraint("vehicle_type IN ('CAR', 'BIKE')", name="ck_parking_slots_vehicle_type"),
-    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     slot_number: Mapped[str] = mapped_column(String(10), nullable=False, unique=True)
@@ -40,25 +26,12 @@ class ParkingSlot(Base):
 
 class Booking(Base):
     __tablename__ = "bookings"
-    __table_args__ = (
-        CheckConstraint("vehicle_type_snapshot IN ('CAR', 'BIKE')", name="ck_bookings_vehicle_type_snapshot"),
-        CheckConstraint(
-            "status IN ('PAYMENT_PENDING', 'CONFIRMED', 'EXPIRED', 'CANCELLED')",
-            name="ck_bookings_status",
-        ),
-        CheckConstraint("end_time > start_time", name="ck_bookings_time_order"),
-        CheckConstraint("amount >= 0", name="ck_bookings_amount_non_negative"),
-        Index("ix_bookings_user_date", "user_id", "booking_date"),
-        Index("ix_bookings_slot_date_status", "slot_id", "booking_date", "status"),
-        Index("ix_bookings_hold_expires_at", "hold_expires_at"),
-        Index("ix_bookings_vehicle_id", "vehicle_id"),
-    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     vehicle_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
 
-    # Immutable vehicle snapshots captured at booking creation (A-41)
+    # Vehicle snapshot captured at booking time (since vehicles live in vehicle_db)
     vehicle_number_snapshot: Mapped[str] = mapped_column(String(20), nullable=False)
     vehicle_type_snapshot: Mapped[str] = mapped_column(String(10), nullable=False)
     is_ev_snapshot: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -75,25 +48,35 @@ class Booking(Base):
     hold_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
-    )
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     slot: Mapped["ParkingSlot"] = relationship("ParkingSlot", back_populates="bookings")
 
 
-class BookingIdempotencyKey(Base):
-    __tablename__ = "booking_idempotency_keys"
-    __table_args__ = (
-        UniqueConstraint("user_id", "idempotency_key", name="uq_booking_idempotency_user_key"),
-    )
+def seed_default_slots(db: Session) -> None:
+    """Seed the 100 parking slots (C01-C60, B01-B40) if the table is empty."""
+    count = db.execute(select(func.count(ParkingSlot.id))).scalar_one()
+    if count > 0:
+        return
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    idempotency_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    booking_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    slots: list[ParkingSlot] = []
+    # C01-C50: normal CAR slots; C51-C60: EV charging CAR slots
+    for i in range(1, 61):
+        slots.append(
+            ParkingSlot(
+                slot_number=f"C{i:02d}",
+                vehicle_type="CAR",
+                is_charging_enabled=(i >= 51),
+            )
+        )
+    # B01-B35: normal BIKE slots; B36-B40: EV charging BIKE slots
+    for i in range(1, 41):
+        slots.append(
+            ParkingSlot(
+                slot_number=f"B{i:02d}",
+                vehicle_type="BIKE",
+                is_charging_enabled=(i >= 36),
+            )
+        )
+    db.add_all(slots)
+    db.commit()
