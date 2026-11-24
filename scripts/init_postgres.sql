@@ -24,3 +24,20 @@ GRANT CONNECT ON DATABASE user_db    TO user_auth_user;
 GRANT CONNECT ON DATABASE vehicle_db TO vehicle_user;
 GRANT CONNECT ON DATABASE parking_db TO parking_user;
 GRANT CONNECT ON DATABASE payment_db TO payment_user;
+
+-- 4. Grant public schema ownership/create privileges (required in PostgreSQL 15+)
+\c user_db
+ALTER SCHEMA public OWNER TO user_auth_user;
+GRANT ALL ON SCHEMA public TO user_auth_user;
+
+\c vehicle_db
+ALTER SCHEMA public OWNER TO vehicle_user;
+GRANT ALL ON SCHEMA public TO vehicle_user;
+
+\c parking_db
+ALTER SCHEMA public OWNER TO parking_user;
+GRANT ALL ON SCHEMA public TO parking_user;
+
+\c payment_db
+ALTER SCHEMA public OWNER TO payment_user;
+GRANT ALL ON SCHEMA public TO payment_user;
