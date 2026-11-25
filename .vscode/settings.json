@@ -1,2 +1,5 @@
 {
+  "mssql.intelliSense.enableErrorChecking": false,
+  "mssql.intelliSense.enableIntelliSense": false,
+  "sql.linter.enabled": false
 }
