@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import logging
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import desc, select
@@ -26,6 +27,7 @@ from app.schemas.auth import (
 from app.services.email_sender import EmailSender, get_email_sender
 
 router = APIRouter(prefix="/api/v1", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -43,7 +45,9 @@ def send_company_code(
     email_sender: EmailSender = Depends(get_email_sender),
 ):
     email = normalize_email(str(payload.email))
+    logger.info("OTP request received for email: %s", email)
     if not is_allowed_corporate_email(email):
+        logger.warning("Rejected non-corporate email: %s", email)
         raise AppError(403, "CORPORATE_EMAIL_REQUIRED", "Only corporate email addresses are allowed.")
 
     now = _utcnow()
@@ -68,6 +72,7 @@ def send_company_code(
     db.commit()
 
     email_sender.send_otp(email=email, code=raw_code, expires_minutes=settings.OTP_EXPIRE_MINUTES)
+    logger.info("OTP generated and sent successfully to %s", email)
     return MessageResponse(message="Verification code sent successfully")
 
 
@@ -94,6 +99,7 @@ def verify_company_code(
         or _as_utc(verification.expires_at) <= now
         or verification.code != payload.code
     ):
+        logger.warning("Invalid or expired OTP attempt for email: %s", email)
         raise AppError(401, "INVALID_OR_EXPIRED_CODE", "Verification code is invalid or has expired.")
 
     verification.consumed_at = now
@@ -102,11 +108,13 @@ def verify_company_code(
     if user is None:
         user = User(email=email, name=None)
         db.add(user)
+        logger.info("Creating new user account for email: %s", email)
 
     db.commit()
     db.refresh(user)
 
     access_token, expires_in = create_access_token(user.id)
+    logger.info("User verified successfully. JWT issued for user_id=%s", user.id)
     return AuthTokenResponse(
         access_token=access_token,
         expires_in=expires_in,
@@ -128,4 +136,5 @@ def update_me(
     current_user.name = payload.name.strip()
     db.commit()
     db.refresh(current_user)
+    logger.info("Updated profile name for user_id=%s", current_user.id)
     return UserProfile.model_validate(current_user)

@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, status
@@ -17,6 +18,7 @@ from app.schemas.vehicle import (
 )
 
 router = APIRouter(prefix="/api/v1/vehicles", tags=["vehicles"])
+logger = logging.getLogger(__name__)
 
 
 def _get_owned_active_vehicle(db: Session, vehicle_id: uuid.UUID, user_id: uuid.UUID) -> Vehicle:
@@ -28,6 +30,7 @@ def _get_owned_active_vehicle(db: Session, vehicle_id: uuid.UUID, user_id: uuid.
         )
     ).scalar_one_or_none()
     if vehicle is None:
+        logger.warning("Vehicle not found: vehicle_id=%s for user_id=%s", vehicle_id, user_id)
         raise AppError(404, "VEHICLE_NOT_FOUND", "Vehicle not found.")
     return vehicle
 
@@ -46,6 +49,7 @@ def create_vehicle(
         )
     ).scalar_one_or_none()
     if existing is not None:
+        logger.warning("Duplicate vehicle registration attempt: %s for user_id=%s", payload.vehicle_number, user_id)
         raise AppError(409, "VEHICLE_ALREADY_REGISTERED", "An active vehicle with this number is already registered.")
 
     vehicle = Vehicle(
@@ -58,6 +62,7 @@ def create_vehicle(
     db.add(vehicle)
     db.commit()
     db.refresh(vehicle)
+    logger.info("Registered new vehicle %s (id=%s) for user_id=%s", vehicle.vehicle_number, vehicle.id, user_id)
     return VehicleResponse.model_validate(vehicle)
 
 
@@ -102,6 +107,7 @@ def update_vehicle(
         )
     ).scalar_one_or_none()
     if duplicate is not None:
+        logger.warning("Duplicate vehicle number on update: %s for user_id=%s", payload.vehicle_number, user_id)
         raise AppError(409, "VEHICLE_ALREADY_REGISTERED", "An active vehicle with this number is already registered.")
 
     vehicle.vehicle_number = payload.vehicle_number
@@ -110,6 +116,7 @@ def update_vehicle(
 
     db.commit()
     db.refresh(vehicle)
+    logger.info("Updated vehicle_id=%s for user_id=%s", vehicle.id, user_id)
     return VehicleResponse.model_validate(vehicle)
 
 
@@ -122,6 +129,7 @@ def deactivate_vehicle(
     vehicle = _get_owned_active_vehicle(db, vehicle_id, user_id)
     vehicle.is_active = False
     db.commit()
+    logger.info("Deactivated vehicle_id=%s for user_id=%s", vehicle.id, user_id)
 
     return VehicleDeactivateResponse(
         id=vehicle.id,

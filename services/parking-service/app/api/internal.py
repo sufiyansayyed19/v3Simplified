@@ -1,4 +1,5 @@
 from datetime import datetime
+import logging
 from typing import Literal
 import uuid
 
@@ -14,12 +15,14 @@ from app.core.errors import AppError
 from app.models.parking import Booking
 
 router = APIRouter(prefix="/internal/v1", tags=["internal"])
+logger = logging.getLogger(__name__)
 
 
 def _require_internal_token(
     token: str | None = Header(default=None, alias="X-Internal-Service-Token"),
 ) -> None:
     if not token or token != settings.INTERNAL_SERVICE_TOKEN:
+        logger.warning("Unauthorized internal service callback attempt.")
         raise AppError(401, "INTERNAL_CALLER_UNAUTHORIZED", "Invalid internal service token.")
 
 
@@ -47,11 +50,14 @@ def apply_payment_result(
     now: datetime = Depends(get_now),
     db: Session = Depends(get_db),
 ):
+    logger.info("Received payment callback for booking_id=%s with status=%s", booking_id, payload.status)
     booking = db.execute(select(Booking).where(Booking.id == booking_id)).scalar_one_or_none()
     if booking is None:
+        logger.warning("Booking not found for payment callback: booking_id=%s", booking_id)
         raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found.")
 
     if booking.payment_id is not None and booking.payment_id != payload.payment_id:
+        logger.warning("Payment reference mismatch for booking_id=%s", booking_id)
         raise AppError(409, "PAYMENT_REFERENCE_MISMATCH", "Callback payment_id does not match booking.")
 
     now_utc = as_utc(now)
@@ -76,4 +82,5 @@ def apply_payment_result(
 
     db.commit()
     db.refresh(booking)
+    logger.info("Booking %s updated to status=%s after payment callback", booking.id, booking.status)
     return PaymentResultResponse(booking_id=booking.id, status=booking.status, result="APPLIED")

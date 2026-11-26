@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, Header, Response, status
@@ -21,6 +22,7 @@ from app.schemas.payment import (
 from app.services.parking_callback import ParkingCallbackClient, get_callback_client
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def get_now_utc() -> datetime:
@@ -67,6 +69,7 @@ def create_internal_payment(
         same_user = existing.user_id == payload.user_id
         same_amount = Decimal(existing.amount) == Decimal(payload.amount)
         if not (same_user and same_amount):
+            logger.warning("Payment conflict for booking_id=%s", payload.booking_id)
             raise AppError(
                 409,
                 "PAYMENT_REQUEST_CONFLICT",
@@ -91,6 +94,7 @@ def create_internal_payment(
     db.add(payment)
     db.commit()
     db.refresh(payment)
+    logger.info("Created pending payment_id=%s for booking_id=%s (amount=%s)", payment.id, payment.booking_id, payment.amount)
 
     return InternalPaymentCreateResponse(
         payment_id=payment.id,
@@ -115,16 +119,20 @@ def process_payment(
     db: Session = Depends(get_db),
     callback_client: ParkingCallbackClient = Depends(get_callback_client),
 ):
+    logger.info("Processing payment_id=%s via method=%s for user_id=%s", payment_id, payload.payment_method, user_id)
     payment = db.execute(
         select(Payment).where(Payment.id == payment_id, Payment.user_id == user_id)
     ).scalar_one_or_none()
     if payment is None:
+        logger.warning("Payment not found: payment_id=%s", payment_id)
         raise AppError(404, "PAYMENT_NOT_FOUND", "Payment not found.")
 
     if payment.status != "PENDING":
+        logger.warning("Payment already processed: payment_id=%s (status=%s)", payment_id, payment.status)
         raise AppError(409, "PAYMENT_ALREADY_PROCESSED", "Payment has already been processed.")
 
     if _as_utc(now_utc) >= _as_utc(payment.expires_at):
+        logger.warning("Payment window expired for payment_id=%s", payment_id)
         raise AppError(409, "PAYMENT_EXPIRED", "Payment window has expired.")
 
     outcome = _resolve_simulated_outcome(test_outcome_header)
@@ -135,6 +143,7 @@ def process_payment(
     payment.transaction_id = txn_id
     db.commit()
     db.refresh(payment)
+    logger.info("Payment %s finished with status=%s (txn_id=%s)", payment.id, payment.status, payment.transaction_id)
 
     callback_client.deliver_payment_result(
         booking_id=payment.booking_id,

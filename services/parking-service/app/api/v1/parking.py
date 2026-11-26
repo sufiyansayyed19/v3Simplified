@@ -1,4 +1,5 @@
 from datetime import date, datetime, time, timedelta
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, Query, status
@@ -32,6 +33,7 @@ from app.services.rules import (
 )
 
 router = APIRouter(prefix="/api/v1/parking", tags=["parking"])
+logger = logging.getLogger(__name__)
 
 HOLD_DURATION_MINUTES = 5
 
@@ -185,6 +187,7 @@ def create_booking(
         .limit(1)
     ).scalar_one_or_none()
     if user_overlap is not None:
+        logger.warning("Overlapping booking attempt by user_id=%s on date=%s", auth.user_id, payload.date)
         raise AppError(
             409,
             "USER_BOOKING_OVERLAP",
@@ -210,6 +213,7 @@ def create_booking(
 
     chosen_slot = next((s for s in compatible_slots if s.id not in occupied_slot_ids), None)
     if chosen_slot is None:
+        logger.warning("No parking capacity available for user_id=%s on date=%s", auth.user_id, payload.date)
         raise AppError(
             409,
             "NO_PARKING_CAPACITY",
@@ -234,6 +238,7 @@ def create_booking(
     db.add(booking)
     db.commit()
     db.refresh(booking)
+    logger.info("Created booking_id=%s on slot=%s for user_id=%s (status=PAYMENT_PENDING)", booking.id, chosen_slot.slot_number, auth.user_id)
 
     # 5. Create pending payment in Payment Service
     payment_id = payment_client.create_payment(
@@ -245,6 +250,7 @@ def create_booking(
     booking.payment_id = payment_id
     db.commit()
     db.refresh(booking)
+    logger.info("Linked payment_id=%s to booking_id=%s", payment_id, booking.id)
 
     return _to_booking_response(booking, chosen_slot.slot_number)
 
@@ -337,6 +343,7 @@ def cancel_booking(
     booking.cancelled_at = now_utc
     db.commit()
     db.refresh(booking)
+    logger.info("Cancelled booking_id=%s for user_id=%s", booking.id, auth.user_id)
 
     return BookingCancelResponse(
         booking_id=booking.id,
